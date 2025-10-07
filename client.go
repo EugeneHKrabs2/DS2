@@ -1,25 +1,36 @@
-package viewservice
+package pbservice
 
-import "net/rpc"
-import "fmt"
+import (
+	"crypto/rand"
+	"fmt"
+	"math/big"
+	"net/rpc"
+	"time"
+	"viewservice"
+)
 
-//
-// the viewservice Clerk lives in the client
-// and maintains a little state.
-//
+func nrand() int64 {
+	max := big.NewInt(int64(1) << 62)
+	bigx, _ := rand.Int(rand.Reader, max)
+	x := bigx.Int64()
+	return x
+}
+
+// You'll probably need to uncomment these:
+
 type Clerk struct {
-  me string      // client's name (host:port)
-  server string  // viewservice's host:port
+	vs *viewservice.Clerk
+	// Your declarations here
 }
 
-func MakeClerk(me string, server string) *Clerk {
-  ck := new(Clerk)
-  ck.me = me
-  ck.server = server
-  return ck
+func MakeClerk(vshost string, me string) *Clerk {
+	ck := new(Clerk)
+	ck.vs = viewservice.MakeClerk(me, vshost)
+	// Your ck.* initializations here
+
+	return ck
 }
 
-//
 // call() sends an RPC to the rpcname handler on server srv
 // with arguments args, waits for the reply, and leaves the
 // reply in reply. the reply argument should be a pointer
@@ -34,54 +45,78 @@ func MakeClerk(me string, server string) *Clerk {
 //
 // please use call() to send all RPCs, in client.go and server.go.
 // please don't change this function.
-//
 func call(srv string, rpcname string,
-          args interface{}, reply interface{}) bool {
-  c, errx := rpc.Dial("unix", srv)
-  if errx != nil {
-    return false
-  }
-  defer c.Close()
-    
-  err := c.Call(rpcname, args, reply)
-  if err == nil {
-    return true
-  }
+	args interface{}, reply interface{}) bool {
+	c, errx := rpc.Dial("unix", srv)
+	if errx != nil {
+		return false
+	}
+	defer c.Close()
 
-  fmt.Println(err)
-  return false
+	err := c.Call(rpcname, args, reply)
+	if err == nil {
+		return true
+	}
+
+	fmt.Println(err)
+	return false
 }
 
-func (ck *Clerk) Ping(viewnum uint) (View, error) {
-  // prepare the arguments.
-  args := &PingArgs{}
-  args.Me = ck.me
-  args.Viewnum = viewnum
-  var reply PingReply
+// fetch a key's value from the current primary;
+// if they key has never been set, return "".
+// Get() must keep trying until it either the
+// primary replies with the value or the primary
+// says the key doesn't exist (has never been Put().
+func (ck *Clerk) Get(key string) string {
 
-  // send an RPC request, wait for the reply.
-  ok := call(ck.server, "ViewServer.Ping", args, &reply)
-  if ok == false {
-    return View{}, fmt.Errorf("Ping(%v) failed", viewnum)
-  }
+	// Your code here.
+	args := &GetArgs{Key: key, OperationID: nrand()}
 
-  return reply.View, nil
+	for {
+		primary := ck.vs.Primary()
+		var reply GetReply
+		ok := call(primary, "PBServer.Get", args, &reply)
+		if ok {
+			switch reply.Err {
+			case OK:
+				return reply.Value
+			case ErrNoKey:
+				return ""
+			case ErrWrongServer:
+				continue
+			}
+		}
+	}
 }
 
-func (ck *Clerk) Get() (View, bool) {
-  args := &GetArgs{}
-  var reply GetReply
-  ok := call(ck.server, "ViewServer.Get", args, &reply)
-  if ok == false {
-    return View{}, false
-  }
-  return reply.View, true
+// tell the primary to update key's value.
+// must keep trying until it succeeds.
+func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
+
+	// Your code here.
+	args := &PutArgs{
+		Key:         key,
+		Value:       value,
+		DoHash:      dohash,
+		OperationID: nrand(),
+	}
+	for {
+		primary := ck.vs.Primary()
+		var reply PutReply
+		ok := call(primary, "PBServer.Put", args, &reply)
+		if ok && reply.Err == OK {
+			return reply.PreviousValue
+		}
+		view, _ := ck.vs.Get()
+		fmt.Printf("old=%v, new=%v\n", primary, view.Primary)
+		time.Sleep(time.Millisecond * 100 * 7)
+	}
 }
 
-func (ck *Clerk) Primary() string {
-  v, ok := ck.Get()
-  if ok {
-    return v.Primary
-  }
-  return ""
+func (ck *Clerk) Put(key string, value string) {
+	ck.PutExt(key, value, false)
+}
+func (ck *Clerk) PutHash(key string, value string) string {
+	v := ck.PutExt(key, value, true)
+	return v
 }
